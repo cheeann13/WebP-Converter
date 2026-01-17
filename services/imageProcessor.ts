@@ -1,7 +1,7 @@
 
 export async function convertToWebP(
   file: File, 
-  quality: number = 0.6 // Set to 0.6 to force aggressive lossy compression
+  quality: number = 0.8
 ): Promise<{ blob: Blob; fileName: string }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -18,12 +18,8 @@ export async function convertToWebP(
           return;
         }
         
-        // Standard draw to ensure we are working with raw pixel data
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(img, 0, 0);
         
-        // Explicitly requesting image/webp with quality < 1.0 triggers 
-        // the browser's lossy encoder. 0.6 is a high-compression sweet spot.
         canvas.toBlob(
           (blob) => {
             if (blob) {

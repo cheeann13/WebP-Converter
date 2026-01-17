@@ -1,7 +1,8 @@
 
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import JSZip from 'jszip';
 import Dropzone from './components/Dropzone';
+import ImageItem from './components/ImageItem';
 import { ImageFile } from './types';
 import { convertToWebP } from './services/imageProcessor';
 
@@ -9,6 +10,7 @@ const App: React.FC = () => {
   const [images, setImages] = useState<ImageFile[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isZipping, setIsZipping] = useState(false);
+  const [zipBlob, setZipBlob] = useState<Blob | null>(null);
 
   const handleFilesAdded = (files: File[]) => {
     const newImages: ImageFile[] = files.map(file => ({
@@ -19,205 +21,208 @@ const App: React.FC = () => {
       progress: 0
     }));
     setImages(prev => [...prev, ...newImages]);
+    setZipBlob(null);
   };
 
-  const processBatch = async () => {
+  const removeImage = (id: string) => {
+    setImages(prev => {
+      const removed = prev.find(img => img.id === id);
+      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      return prev.filter(img => img.id !== id);
+    });
+    setZipBlob(null);
+  };
+
+  const clearAll = () => {
+    images.forEach(img => URL.revokeObjectURL(img.previewUrl));
+    setImages([]);
+    setZipBlob(null);
+  };
+
+  const processImages = async () => {
     if (images.length === 0) return;
     setIsProcessing(true);
+    setZipBlob(null);
     
+    // Process images sequentially
     for (let i = 0; i < images.length; i++) {
       const img = images[i];
       if (img.status === 'completed') continue;
 
       setImages(prev => prev.map(item => 
-        item.id === img.id ? { ...item, status: 'processing' } : item
+        item.id === img.id ? { ...item, status: 'processing', progress: 30 } : item
       ));
 
       try {
-        // Explicitly use 0.6 for high-efficiency lossy compression
-        const result = await convertToWebP(img.file, 0.6);
+        const result = await convertToWebP(img.file);
         setImages(prev => prev.map(item => 
           item.id === img.id ? { 
             ...item, 
             status: 'completed', 
+            progress: 100, 
             resultBlob: result.blob, 
             resultName: result.fileName 
           } : item
         ));
       } catch (err) {
+        console.error("Conversion error for " + img.file.name, err);
         setImages(prev => prev.map(item => 
-          item.id === img.id ? { ...item, status: 'error' } : item
+          item.id === img.id ? { ...item, status: 'error', progress: 100 } : item
         ));
       }
     }
+
     setIsProcessing(false);
+    // After loop, the state update is queued. ZIP is created on demand or triggered here.
+    await generateAndSetZip();
   };
 
-  const downloadZip = async () => {
+  const generateAndSetZip = async (currentImages?: ImageFile[]) => {
     setIsZipping(true);
     try {
       const zip = new JSZip();
-      const completed = images.filter(img => img.status === 'completed' && img.resultBlob);
-      if (completed.length === 0) {
+      const list = currentImages || images;
+      const completedImages = list.filter(img => img.status === 'completed' && img.resultBlob);
+      
+      if (completedImages.length === 0) {
         setIsZipping(false);
-        return;
+        return null;
       }
-      completed.forEach(img => {
-        zip.file(img.resultName!, img.resultBlob!);
+
+      completedImages.forEach(img => {
+        if (img.resultBlob && img.resultName) {
+          zip.file(img.resultName, img.resultBlob);
+        }
       });
+
       const content = await zip.generateAsync({ type: "blob" });
-      const url = URL.createObjectURL(content);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `format_shift_export_${Date.now()}.zip`;
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error(e);
+      setZipBlob(content);
+      setIsZipping(false);
+      return content;
+    } catch (err) {
+      console.error("ZIP generation error", err);
+      setIsZipping(false);
+      return null;
     }
-    setIsZipping(false);
   };
 
-  const formatSize = (bytes: number) => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  const downloadZip = async () => {
+    let targetBlob = zipBlob;
+    
+    // Fallback: If zipBlob isn't ready but we have completed images, generate it now
+    if (!targetBlob) {
+      targetBlob = await generateAndSetZip();
+    }
+
+    if (!targetBlob) {
+      alert("No converted images ready to download.");
+      return;
+    }
+
+    const url = URL.createObjectURL(targetBlob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `converted_images_${new Date().getTime()}.zip`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    // Slight delay before revoking to ensure the browser handles the download stream
+    setTimeout(() => URL.revokeObjectURL(url), 100);
   };
 
-  const calculateSavings = (original: number, current: number) => {
-    const diff = original - current;
-    const ratio = (diff / original) * 100;
-    return (ratio > 0 ? '-' : '+') + Math.abs(ratio).toFixed(0) + '%';
-  };
+  const allCompleted = images.length > 0 && images.every(img => img.status === 'completed' || img.status === 'error');
+  const hasCompleted = images.some(img => img.status === 'completed');
 
   return (
-    <div className="flex flex-col min-h-screen">
-      {/* Header Bar */}
-      <header className="flex border-b-4 border-black bg-white sticky top-0 z-50">
-        <div className="bg-black text-white px-8 py-4 flex items-center">
-          <h1 className="text-2xl font-black tracking-tighter">FORMAT<span className="text-red-500">.</span>SHIFT</h1>
+    <div className="max-w-4xl mx-auto px-4 py-12">
+      <header className="mb-12 text-center">
+        <div className="inline-flex items-center justify-center space-x-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold uppercase tracking-wider mb-6">
+          <i className="fas fa-bolt"></i>
+          <span>Client-Side Optimization</span>
         </div>
-        <div className="flex-grow flex items-center justify-end px-8 gap-8 text-[10px] font-bold tracking-widest text-neutral-500 uppercase">
-          <span>Client-Side Processing</span>
-          <span>•</span>
-          <span>Secure</span>
-          <span>•</span>
-          <span>Fast</span>
-        </div>
-        <div className="border-l-4 border-black px-8 py-4 flex items-center font-black">
-          V.1.0
-        </div>
+        <h1 className="text-5xl font-extrabold tracking-tight mb-4 text-white">
+          WebP Bulk Converter
+        </h1>
+        <p className="text-neutral-400 text-lg max-w-2xl mx-auto">
+          Lightning fast image conversion. Drag, drop, and convert to optimized WebP 
+          instantly without uploading a single byte to any server.
+        </p>
       </header>
 
-      <main className="flex-grow flex flex-col lg:flex-row">
-        {/* Left Pane */}
-        <div className="w-full lg:w-[45%] p-12 lg:p-20 flex flex-col justify-between border-b-4 lg:border-b-0 lg:border-r-4 border-black">
-          <div>
-            <h2 className="text-7xl lg:text-9xl font-black leading-[0.85] tracking-tighter mb-8 uppercase">
-              WebP<br />Converter
-            </h2>
-            <div className="w-20 h-2 bg-red-500 mb-10"></div>
-            <p className="text-2xl font-medium leading-tight max-w-md mb-12">
-              Transform your image library into high-performance WebP assets. Drag, drop, and deploy.
-            </p>
+      <main className="space-y-8">
+        <Dropzone onFilesAdded={handleFilesAdded} disabled={isProcessing || isZipping} />
 
-            <div className="grid grid-cols-2 gap-12 border-t-2 border-black pt-8 mb-16">
-              <div>
-                <span className="text-[10px] uppercase tracking-widest text-neutral-400 font-bold mb-2 block">Compression</span>
-                <span className="text-4xl font-black">~80%</span>
-              </div>
-              <div>
-                <span className="text-[10px] uppercase tracking-widest text-neutral-400 font-bold mb-2 block">Quality</span>
-                <span className="text-4xl font-black">Lossy</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-4">
-            <button 
-              onClick={images.some(i => i.status === 'completed') ? downloadZip : processBatch}
-              disabled={isProcessing || isZipping || images.length === 0}
-              className="w-full bg-black text-white py-6 text-xl font-black uppercase tracking-widest brutalist-shadow active:translate-x-1 active:translate-y-1 active:shadow-none transition-all flex items-center justify-center gap-3 disabled:opacity-50"
-            >
-              {isZipping ? <i className="fas fa-spinner fa-spin"></i> : <i className={`fas ${images.some(i => i.status === 'completed') ? 'fa-download' : 'fa-bolt'}`}></i>}
-              {images.some(i => i.status === 'completed') ? 'Download ZIP Archive' : (isProcessing ? 'Processing...' : 'Start Batch Process')}
-            </button>
-            <button 
-              onClick={() => { setImages([]); }}
-              className="w-full border-4 border-black py-6 text-xl font-black uppercase tracking-widest hover:bg-black hover:text-white transition-colors flex items-center justify-center gap-3"
-            >
-              <i className="fas fa-rotate"></i>
-              Process New Batch
-            </button>
-          </div>
-        </div>
-
-        {/* Right Pane */}
-        <div className="w-full lg:w-[55%] p-12 bg-white overflow-y-auto">
-          {images.length === 0 ? (
-            <div className="h-full border-4 border-black relative flex flex-col items-center justify-center brutalist-shadow bg-white p-12 group cursor-pointer">
-              <Dropzone onFilesAdded={handleFilesAdded} />
-            </div>
-          ) : (
-            <div className="brutalist-border brutalist-shadow p-8 min-h-full">
-              <div className="flex justify-between items-end mb-8 border-b-4 border-black pb-4">
-                <div>
-                  <h3 className="text-3xl font-black uppercase tracking-tight">Processing Queue</h3>
-                  <p className="text-sm font-bold text-neutral-400 uppercase tracking-widest">
-                    {images.filter(i => i.status === 'completed').length} / {images.length} Completed
-                  </p>
-                </div>
-              </div>
-
-              <div className="w-full">
-                <div className="grid grid-cols-[1fr,80px,80px,80px,40px] gap-4 mb-4 text-[10px] font-bold uppercase tracking-widest text-neutral-400 px-4">
-                  <span>Filename</span>
-                  <span className="text-right">Original</span>
-                  <span className="text-right">WebP</span>
-                  <span className="text-right">Saved</span>
-                  <span className="text-center">Status</span>
-                </div>
+        {images.length > 0 && (
+          <div className="bg-neutral-900/30 border border-neutral-800 rounded-2xl p-6 backdrop-blur-sm">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-lg font-semibold flex items-center gap-2 text-neutral-200">
+                <i className="fas fa-list text-neutral-500"></i>
+                Queue ({images.length})
+              </h2>
+              <div className="flex gap-3">
+                <button 
+                  onClick={clearAll}
+                  disabled={isProcessing || isZipping}
+                  className="px-4 py-2 text-sm text-neutral-400 hover:text-white hover:bg-neutral-800 rounded-lg transition-all disabled:opacity-30"
+                >
+                  Clear All
+                </button>
                 
-                <div className="space-y-4">
-                  {images.map(img => (
-                    <div key={img.id} className="grid grid-cols-[1fr,80px,80px,80px,40px] gap-4 items-center bg-white border-2 border-black p-4 brutalist-shadow-sm hover:translate-x-[-2px] hover:translate-y-[-2px] transition-transform">
-                      <div className="flex items-center gap-4 min-w-0">
-                        <img src={img.previewUrl} className="w-10 h-10 object-cover border-2 border-black flex-shrink-0" />
-                        <span className="font-bold truncate text-sm">{img.file.name}</span>
-                      </div>
-                      <span className="text-[10px] text-right text-neutral-500 font-bold uppercase">{formatSize(img.file.size)}</span>
-                      <span className="text-[10px] text-right font-black uppercase">
-                        {img.resultBlob ? formatSize(img.resultBlob.size) : '--'}
-                      </span>
-                      <span className={`text-[10px] text-right font-black ${img.resultBlob && img.resultBlob.size > img.file.size ? 'text-red-500' : 'text-emerald-500'}`}>
-                        {img.resultBlob ? calculateSavings(img.file.size, img.resultBlob.size) : '--'}
-                      </span>
-                      <div className="flex justify-center">
-                        {img.status === 'completed' ? (
-                          <div className={`w-6 h-6 ${img.resultBlob && img.resultBlob.size > img.file.size ? 'bg-orange-500' : 'bg-red-500'} text-white flex items-center justify-center border-2 border-black`}>
-                            <i className="fas fa-check text-[10px]"></i>
-                          </div>
-                        ) : img.status === 'processing' ? (
-                          <i className="fas fa-spinner fa-spin text-neutral-400"></i>
-                        ) : (
-                          <div className="w-6 h-6 border-2 border-black"></div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                {allCompleted && hasCompleted ? (
+                   <button 
+                    onClick={downloadZip}
+                    disabled={isZipping}
+                    className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-medium shadow-lg shadow-emerald-600/20 flex items-center gap-2 transition-all disabled:bg-neutral-700"
+                  >
+                    {isZipping ? (
+                      <><i className="fas fa-spinner fa-spin"></i> Zipping...</>
+                    ) : (
+                      <><i className="fas fa-download"></i> Download ZIP</>
+                    )}
+                  </button>
+                ) : (
+                  <button 
+                    onClick={processImages}
+                    disabled={isProcessing || isZipping || images.length === 0}
+                    className={`px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium shadow-lg shadow-blue-600/20 flex items-center gap-2 transition-all
+                      ${(isProcessing || isZipping) ? 'opacity-70 cursor-not-allowed' : ''}`}
+                  >
+                    {isProcessing ? (
+                      <><i className="fas fa-spinner fa-spin"></i> Converting...</>
+                    ) : (
+                      <><i className="fas fa-play"></i> Start Conversion</>
+                    )}
+                  </button>
+                )}
               </div>
             </div>
-          )}
-        </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {images.map(img => (
+                <ImageItem key={img.id} image={img} onRemove={removeImage} />
+              ))}
+            </div>
+          </div>
+        )}
       </main>
 
-      {/* Footer Info */}
-      <footer className="border-t-4 border-black p-4 flex justify-between bg-white text-[10px] font-bold tracking-widest uppercase text-neutral-400">
-        <div>System Ready • Forced Lossy Mode</div>
-        <div>&copy; {new Date().getFullYear()} FORMAT.SHIFT</div>
+      <footer className="mt-20 border-t border-neutral-900 pt-8 flex flex-col items-center text-neutral-500 text-sm">
+        <div className="flex gap-6 mb-4">
+          <span className="flex items-center gap-2">
+            <i className="fas fa-shield-halved text-emerald-500/50"></i>
+            Private
+          </span>
+          <span className="flex items-center gap-2">
+            <i className="fas fa-gauge-high text-emerald-500/50"></i>
+            Fast
+          </span>
+          <span className="flex items-center gap-2">
+            <i className="fas fa-check text-emerald-500/50"></i>
+            Free
+          </span>
+        </div>
+        <p>&copy; {new Date().getFullYear()} WebP Bulk Converter. All processing happens in your browser.</p>
       </footer>
     </div>
   );
