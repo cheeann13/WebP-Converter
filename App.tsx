@@ -9,7 +9,6 @@ const App: React.FC = () => {
   const [images, setImages] = useState<ImageFile[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isZipping, setIsZipping] = useState(false);
-  const [zipBlob, setZipBlob] = useState<Blob | null>(null);
 
   const handleFilesAdded = (files: File[]) => {
     const newImages: ImageFile[] = files.map(file => ({
@@ -20,7 +19,6 @@ const App: React.FC = () => {
       progress: 0
     }));
     setImages(prev => [...prev, ...newImages]);
-    setZipBlob(null);
   };
 
   const processBatch = async () => {
@@ -36,7 +34,8 @@ const App: React.FC = () => {
       ));
 
       try {
-        const result = await convertToWebP(img.file);
+        // Explicitly use 0.6 for high-efficiency lossy compression
+        const result = await convertToWebP(img.file, 0.6);
         setImages(prev => prev.map(item => 
           item.id === img.id ? { 
             ...item, 
@@ -87,6 +86,12 @@ const App: React.FC = () => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
+  const calculateSavings = (original: number, current: number) => {
+    const diff = original - current;
+    const ratio = (diff / original) * 100;
+    return (ratio > 0 ? '-' : '+') + Math.abs(ratio).toFixed(0) + '%';
+  };
+
   return (
     <div className="flex flex-col min-h-screen">
       {/* Header Bar */}
@@ -121,11 +126,11 @@ const App: React.FC = () => {
             <div className="grid grid-cols-2 gap-12 border-t-2 border-black pt-8 mb-16">
               <div>
                 <span className="text-[10px] uppercase tracking-widest text-neutral-400 font-bold mb-2 block">Compression</span>
-                <span className="text-4xl font-black">~30%</span>
+                <span className="text-4xl font-black">~80%</span>
               </div>
               <div>
                 <span className="text-[10px] uppercase tracking-widest text-neutral-400 font-bold mb-2 block">Quality</span>
-                <span className="text-4xl font-black">Lossless</span>
+                <span className="text-4xl font-black">Lossy</span>
               </div>
             </div>
           </div>
@@ -140,7 +145,7 @@ const App: React.FC = () => {
               {images.some(i => i.status === 'completed') ? 'Download ZIP Archive' : (isProcessing ? 'Processing...' : 'Start Batch Process')}
             </button>
             <button 
-              onClick={() => { setImages([]); setZipBlob(null); }}
+              onClick={() => { setImages([]); }}
               className="w-full border-4 border-black py-6 text-xl font-black uppercase tracking-widest hover:bg-black hover:text-white transition-colors flex items-center justify-center gap-3"
             >
               <i className="fas fa-rotate"></i>
@@ -154,7 +159,6 @@ const App: React.FC = () => {
           {images.length === 0 ? (
             <div className="h-full border-4 border-black relative flex flex-col items-center justify-center brutalist-shadow bg-white p-12 group cursor-pointer">
               <Dropzone onFilesAdded={handleFilesAdded} />
-              {/* Note: Dropzone component needs to be minimalist to match this container */}
             </div>
           ) : (
             <div className="brutalist-border brutalist-shadow p-8 min-h-full">
@@ -168,27 +172,31 @@ const App: React.FC = () => {
               </div>
 
               <div className="w-full">
-                <div className="grid grid-cols-[1fr,100px,100px,60px] gap-4 mb-4 text-[10px] font-bold uppercase tracking-widest text-neutral-400 px-4">
+                <div className="grid grid-cols-[1fr,80px,80px,80px,40px] gap-4 mb-4 text-[10px] font-bold uppercase tracking-widest text-neutral-400 px-4">
                   <span>Filename</span>
                   <span className="text-right">Original</span>
                   <span className="text-right">WebP</span>
+                  <span className="text-right">Saved</span>
                   <span className="text-center">Status</span>
                 </div>
                 
                 <div className="space-y-4">
                   {images.map(img => (
-                    <div key={img.id} className="grid grid-cols-[1fr,100px,100px,60px] gap-4 items-center bg-white border-2 border-black p-4 brutalist-shadow-sm hover:translate-x-[-2px] hover:translate-y-[-2px] transition-transform">
+                    <div key={img.id} className="grid grid-cols-[1fr,80px,80px,80px,40px] gap-4 items-center bg-white border-2 border-black p-4 brutalist-shadow-sm hover:translate-x-[-2px] hover:translate-y-[-2px] transition-transform">
                       <div className="flex items-center gap-4 min-w-0">
                         <img src={img.previewUrl} className="w-10 h-10 object-cover border-2 border-black flex-shrink-0" />
                         <span className="font-bold truncate text-sm">{img.file.name}</span>
                       </div>
-                      <span className="text-xs text-right text-neutral-500 font-medium">{formatSize(img.file.size)}</span>
-                      <span className="text-xs text-right font-black">
+                      <span className="text-[10px] text-right text-neutral-500 font-bold uppercase">{formatSize(img.file.size)}</span>
+                      <span className="text-[10px] text-right font-black uppercase">
                         {img.resultBlob ? formatSize(img.resultBlob.size) : '--'}
+                      </span>
+                      <span className={`text-[10px] text-right font-black ${img.resultBlob && img.resultBlob.size > img.file.size ? 'text-red-500' : 'text-emerald-500'}`}>
+                        {img.resultBlob ? calculateSavings(img.file.size, img.resultBlob.size) : '--'}
                       </span>
                       <div className="flex justify-center">
                         {img.status === 'completed' ? (
-                          <div className="w-6 h-6 bg-red-500 text-white flex items-center justify-center border-2 border-black">
+                          <div className={`w-6 h-6 ${img.resultBlob && img.resultBlob.size > img.file.size ? 'bg-orange-500' : 'bg-red-500'} text-white flex items-center justify-center border-2 border-black`}>
                             <i className="fas fa-check text-[10px]"></i>
                           </div>
                         ) : img.status === 'processing' ? (
@@ -208,7 +216,7 @@ const App: React.FC = () => {
 
       {/* Footer Info */}
       <footer className="border-t-4 border-black p-4 flex justify-between bg-white text-[10px] font-bold tracking-widest uppercase text-neutral-400">
-        <div>System Ready • Waiting for Input</div>
+        <div>System Ready • Forced Lossy Mode</div>
         <div>&copy; {new Date().getFullYear()} FORMAT.SHIFT</div>
       </footer>
     </div>
