@@ -1,0 +1,5 @@
+{
+  "name": "WebP Bulk Converter",
+  "description": "A high-performance, browser-native bulk image converter that transforms JPG/PNG files into optimized WebP format with zero server latency. Features drag-and-drop and ZIP export.",
+  "requestFramePermissions": []
+}
